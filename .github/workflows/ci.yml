@@ -1,0 +1,60 @@
+name: EnclaveRAG CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  backend-security-and-tests:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: enclave_rag
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres_dev_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d enclave_rag"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      DATABASE_URL: postgresql://enclave_app:enclave_dev_password@localhost:5432/enclave_rag
+      ADMIN_DATABASE_URL: postgresql://postgres:postgres_dev_only@localhost:5432/enclave_rag
+      JWT_SECRET_KEY: ci-test-only-secret-key-min-32-bytes
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Apply PostgreSQL schema and RLS migrations
+        env:
+          PGPASSWORD: postgres_dev_only
+        run: |
+          psql -h localhost -U postgres -d enclave_rag -v ON_ERROR_STOP=1 -f backend/db/migrations/001_init_schema.sql
+          psql -h localhost -U postgres -d enclave_rag -v ON_ERROR_STOP=1 -f backend/db/migrations/002_rls_policies.sql
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi "uvicorn[standard]" pydantic-settings "psycopg[binary,pool]" pgvector pyjwt httpx python-multipart pypdf pytest pytest-asyncio ruff
+
+      - name: Run Ruff lint check
+        working-directory: backend
+        run: ruff check app tests db evals
+
+      - name: Run unit, integration, and security red-team tests
+        working-directory: backend
+        run: pytest -v

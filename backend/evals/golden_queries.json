@@ -1,0 +1,104 @@
+[
+  {
+    "id": "apex-l1-pto",
+    "persona_email": "intern@apex.example.com",
+    "clearance_level": 1,
+    "query": "What is the hybrid work and PTO policy at Apex?",
+    "expected_doc_titles": ["Apex Employee Handbook & PTO Policy"],
+    "forbidden_doc_titles": [
+      "Q4 Engineering Roadmap — Atlas Arm",
+      "Vendor Pricing & Security Incident Postmortem",
+      "Project Helios — Q4 Acquisition & Layoff Plan",
+      "Project Helios — Confidential Counter-Bid"
+    ]
+  },
+  {
+    "id": "apex-l1-blocked-roadmap",
+    "persona_email": "intern@apex.example.com",
+    "clearance_level": 1,
+    "query": "What is the EtherCAT motor control latency target for Atlas Arm?",
+    "expected_doc_titles": [],
+    "forbidden_doc_titles": [
+      "Q4 Engineering Roadmap — Atlas Arm",
+      "Project Helios — Q4 Acquisition & Layoff Plan"
+    ]
+  },
+  {
+    "id": "apex-l1-blocked-helios",
+    "persona_email": "intern@apex.example.com",
+    "clearance_level": 1,
+    "query": "What is Project Helios?",
+    "expected_doc_titles": [],
+    "forbidden_doc_titles": [
+      "Project Helios — Q4 Acquisition & Layoff Plan",
+      "Project Helios — Confidential Counter-Bid"
+    ]
+  },
+  {
+    "id": "apex-l2-roadmap",
+    "persona_email": "lead@apex.example.com",
+    "clearance_level": 2,
+    "query": "What is the EtherCAT motor control latency target for Atlas Arm?",
+    "expected_doc_titles": ["Q4 Engineering Roadmap — Atlas Arm"],
+    "forbidden_doc_titles": [
+      "Vendor Pricing & Security Incident Postmortem",
+      "Project Helios — Q4 Acquisition & Layoff Plan",
+      "Project Helios — Confidential Counter-Bid"
+    ]
+  },
+  {
+    "id": "apex-l2-blocked-nda",
+    "persona_email": "lead@apex.example.com",
+    "clearance_level": 2,
+    "query": "What volume discount did Apex negotiate with PrecisionDrive GmbH?",
+    "expected_doc_titles": [],
+    "forbidden_doc_titles": [
+      "Vendor Pricing & Security Incident Postmortem",
+      "Project Helios — Q4 Acquisition & Layoff Plan"
+    ]
+  },
+  {
+    "id": "apex-l4-helios",
+    "persona_email": "vp@apex.example.com",
+    "clearance_level": 4,
+    "query": "What is Project Helios and its acquisition valuation?",
+    "expected_doc_titles": ["Project Helios — Q4 Acquisition & Layoff Plan"],
+    "forbidden_doc_titles": [
+      "NovaFin Public Product FAQ",
+      "Project Helios — Confidential Counter-Bid"
+    ]
+  },
+  {
+    "id": "apex-l4-cross-org-blocked",
+    "persona_email": "vp@apex.example.com",
+    "clearance_level": 4,
+    "query": "What bridge liquidity did Meridian Capital approve for the counter-bid?",
+    "expected_doc_titles": [],
+    "forbidden_doc_titles": [
+      "NovaFin Public Product FAQ",
+      "Project Helios — Confidential Counter-Bid"
+    ]
+  },
+  {
+    "id": "novafin-l4-faq",
+    "persona_email": "admin@novafin.example.com",
+    "clearance_level": 4,
+    "query": "How many currencies does NovaFin support and what is its uptime SLA?",
+    "expected_doc_titles": ["NovaFin Public Product FAQ"],
+    "forbidden_doc_titles": [
+      "Apex Employee Handbook & PTO Policy",
+      "Project Helios — Q4 Acquisition & Layoff Plan"
+    ]
+  },
+  {
+    "id": "novafin-l4-helios",
+    "persona_email": "admin@novafin.example.com",
+    "clearance_level": 4,
+    "query": "What is Project Helios?",
+    "expected_doc_titles": ["Project Helios — Confidential Counter-Bid"],
+    "forbidden_doc_titles": [
+      "Apex Employee Handbook & PTO Policy",
+      "Project Helios — Q4 Acquisition & Layoff Plan"
+    ]
+  }
+]
