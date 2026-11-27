@@ -18,10 +18,10 @@ _BACKEND_DIR = Path(__file__).resolve().parents[2]
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from app.core.config import settings  # noqa: E402
-from app.ingestion.chunker import chunk_text  # noqa: E402
-from app.ingestion.embedder import embed_documents  # noqa: E402
-from app.ingestion.service import insert_document_with_chunks  # noqa: E402
+from app.core.config import settings
+from app.ingestion.chunker import chunk_text
+from app.ingestion.embedder import embed_documents
+from app.ingestion.service import insert_document_with_chunks
 
 ORGANIZATIONS = [
     {"name": "Apex Robotics", "slug": "apex-robotics"},

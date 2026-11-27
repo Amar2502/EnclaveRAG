@@ -7,7 +7,16 @@ from typing import Annotated
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, Field
 
 from app.core.db import RLSContext, scoped_rls_transaction
@@ -23,7 +32,11 @@ from app.ingestion.service import (
     reclassify_document,
 )
 from app.llm.synthesizer import NO_ACCESSIBLE_INFO_MESSAGE, synthesize_answer
-from app.retrieval.audit import get_accessible_document_detail, list_audit_logs, log_query_audit
+from app.retrieval.audit import (
+    get_accessible_document_detail,
+    list_audit_logs,
+    log_query_audit,
+)
 from app.retrieval.hybrid_search import hybrid_rrf_search
 
 router = APIRouter()
