@@ -46,6 +46,14 @@ async def init_db_pool(conninfo: str | None = None) -> AsyncConnectionPool:
             max_size=10,
             open=False,
             configure=_configure_connection,
+            check=AsyncConnectionPool.check_connection,
+            max_idle=120.0,
+            kwargs={
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 3,
+            },
         )
         await _pool.open(wait=True)
     return _pool
