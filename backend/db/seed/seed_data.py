@@ -149,7 +149,10 @@ SEED_DOCUMENTS = [
 
 async def seed_all() -> None:
     """Insert demo organizations, personas, and embedded documents idempotently."""
-    conn = await psycopg.AsyncConnection.connect(settings.admin_database_url)
+    conn = await psycopg.AsyncConnection.connect(
+        settings.admin_database_url,
+        autocommit=True,
+    )
     await register_vector_async(conn)
 
     org_ids: dict[str, UUID] = {}

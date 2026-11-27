@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     gemini_embedding_model: str = "gemini-embedding-001"
     embedding_dimension: int = 768
 
-    cors_origins: list[str] = ["http://localhost:3000"]
+    cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
     model_config = SettingsConfigDict(env_file=(".env", str(_ROOT_ENV)), extra="ignore")
 
