@@ -19,6 +19,7 @@ if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
 from app.core.config import settings
+from app.core.security import hash_password
 from app.ingestion.chunker import chunk_text
 from app.ingestion.embedder import embed_documents
 from app.ingestion.service import insert_document_with_chunks
@@ -172,18 +173,23 @@ async def seed_all() -> None:
                 assert row is not None
                 org_ids[org["slug"]] = row[0]
 
+            demo_pw_hash = hash_password("EnclaveDemo123!")
             for user in PERSONAS:
+                is_admin = int(user["clearance_level"]) == 4
                 await conn.execute(
                     """
                     INSERT INTO users
-                        (org_id, email, full_name, role_title, department, clearance_level)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (org_id, email, full_name, role_title, department,
+                         clearance_level, password_hash, is_org_admin, is_active)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, true)
                     ON CONFLICT (email) DO UPDATE SET
                         org_id = EXCLUDED.org_id,
                         full_name = EXCLUDED.full_name,
                         role_title = EXCLUDED.role_title,
                         department = EXCLUDED.department,
-                        clearance_level = EXCLUDED.clearance_level
+                        clearance_level = EXCLUDED.clearance_level,
+                        password_hash = COALESCE(users.password_hash, EXCLUDED.password_hash),
+                        is_org_admin = EXCLUDED.is_org_admin
                     """,
                     (
                         org_ids[user["org_slug"]],
@@ -192,6 +198,8 @@ async def seed_all() -> None:
                         user["role_title"],
                         user["department"],
                         user["clearance_level"],
+                        demo_pw_hash,
+                        is_admin,
                     ),
                 )
 

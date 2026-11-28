@@ -9,6 +9,7 @@ from uuid import UUID
 import httpx
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Form,
@@ -19,17 +20,38 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 
+from app.api.admin_routes import router as admin_router
+from app.api.auth_routes import router as auth_router
+from app.api.billing_routes import router as billing_router
+from app.core.config import settings
 from app.core.db import RLSContext, scoped_rls_transaction
-from app.core.security import create_access_token, get_current_rls_context
+from app.core.quotas import (
+    QuotaExceededError,
+    RateLimitExceededError,
+    check_and_increment_query_usage,
+    enforce_org_rate_limit,
+)
+from app.core.security import (
+    create_access_token,
+    get_current_rls_context,
+    require_org_admin,
+)
 from app.ingestion.chunker import extract_text_from_upload
 from app.ingestion.embedder import embed_query
 from app.ingestion.service import (
     ClearanceViolationError,
+    delete_document,
     get_persona_by_email,
     ingest_document,
     list_accessible_documents,
     list_demo_personas,
     reclassify_document,
+)
+from app.ingestion.worker import (
+    enqueue_ingestion_job,
+    get_ingestion_job,
+    list_ingestion_jobs,
+    process_ingestion_job,
 )
 from app.llm.synthesizer import NO_ACCESSIBLE_INFO_MESSAGE, synthesize_answer
 from app.retrieval.audit import (
@@ -40,6 +62,17 @@ from app.retrieval.audit import (
 from app.retrieval.hybrid_search import hybrid_rrf_search
 
 router = APIRouter()
+router.include_router(auth_router)
+router.include_router(admin_router)
+router.include_router(billing_router)
+
+
+def _ensure_demo_enabled() -> None:
+    if not settings.enable_demo_mode:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Demo endpoints are disabled in production mode.",
+        )
 
 
 class PersonaTokenRequest(BaseModel):
@@ -58,9 +91,10 @@ class IngestTextRequest(BaseModel):
 
 
 class ReclassifyRequest(BaseModel):
-    """Payload for O(1) document clearance updates."""
+    """Payload for O(1) document clearance and department updates."""
 
     clearance_level: int = Field(ge=1, le=4)
+    department: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class QueryRequest(BaseModel):
@@ -70,16 +104,18 @@ class QueryRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20)
 
 
-@router.get("/personas", tags=["auth"])
+@router.get("/personas", tags=["demo"])
 async def get_personas() -> dict[str, list[dict[str, object]]]:
-    """List seeded demo personas across organizations."""
+    """List seeded demo personas across organizations (dev demo mode only)."""
+    _ensure_demo_enabled()
     personas = await list_demo_personas()
     return {"personas": personas}
 
 
-@router.post("/auth/persona-token", tags=["auth"])
+@router.post("/auth/persona-token", tags=["demo"])
 async def issue_persona_token(payload: PersonaTokenRequest) -> dict[str, object]:
-    """Issue a signed JWT for a seeded demo persona."""
+    """Issue a signed JWT for a seeded demo persona (dev demo mode only)."""
+    _ensure_demo_enabled()
     persona = await get_persona_by_email(payload.email)
     if persona is None:
         raise HTTPException(
@@ -92,6 +128,8 @@ async def issue_persona_token(payload: PersonaTokenRequest) -> dict[str, object]
         user_id=persona["user_id"],
         clearance_level=persona["clearance_level"],
         department=persona["department"],
+        is_org_admin=bool(persona.get("is_org_admin", False)),
+        token_version=int(persona.get("token_version", 1)),
     )
     token = create_access_token(ctx)
     return {
@@ -106,6 +144,7 @@ async def issue_persona_token(payload: PersonaTokenRequest) -> dict[str, object]
             "role_title": persona["role_title"],
             "department": persona["department"],
             "clearance_level": persona["clearance_level"],
+            "is_org_admin": ctx.is_org_admin,
         },
     }
 
@@ -119,22 +158,29 @@ async def whoami(
         await cur.execute(
             "SELECT current_setting('app.org_id', true), "
             "current_setting('app.clearance_level', true), "
-            "current_setting('app.user_id', true)"
+            "current_setting('app.user_id', true), "
+            "current_setting('app.department', true), "
+            "current_setting('app.is_org_admin', true)"
         )
         row = await cur.fetchone()
 
-    db_org_id, db_clearance, db_user_id = row if row else (None, None, None)
+    db_org_id, db_clearance, db_user_id, db_dept, db_admin = (
+        row if row else (None, None, None, None, None)
+    )
     return {
         "jwt_claims": {
             "user_id": str(ctx.user_id),
             "org_id": str(ctx.org_id),
             "clearance_level": ctx.clearance_level,
             "department": ctx.department,
+            "is_org_admin": ctx.is_org_admin,
         },
         "postgres_session": {
             "app.org_id": db_org_id,
             "app.clearance_level": int(db_clearance) if db_clearance else None,
             "app.user_id": db_user_id,
+            "app.department": db_dept,
+            "app.is_org_admin": db_admin == "true" if db_admin else False,
         },
     }
 
@@ -170,6 +216,8 @@ async def _run_ingest(
         return {"document": record.to_dict()}
     except ClearanceViolationError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except QuotaExceededError as exc:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except (RuntimeError, httpx.HTTPError) as exc:
@@ -221,6 +269,61 @@ async def upload_document(
     )
 
 
+@router.post("/documents/upload-async", status_code=status.HTTP_202_ACCEPTED, tags=["documents"])
+async def upload_document_async(
+    background_tasks: BackgroundTasks,
+    ctx: Annotated[RLSContext, Depends(get_current_rls_context)],
+    file: Annotated[UploadFile, File(...)],
+    clearance_level: Annotated[int, Form(ge=1, le=4)],
+    department: Annotated[str, Form()] = "General",
+    title: Annotated[str | None, Form()] = None,
+) -> dict[str, object]:
+    """Store raw upload in object storage and process chunking/embeddings asynchronously."""
+    raw_bytes = await file.read()
+    filename = file.filename or "uploaded.txt"
+    try:
+        job = await enqueue_ingestion_job(
+            ctx,
+            title=title or filename,
+            department=department,
+            clearance_level=clearance_level,
+            filename=filename,
+            content_bytes=raw_bytes,
+            content_type=file.content_type or "application/octet-stream",
+        )
+    except ClearanceViolationError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except QuotaExceededError as exc:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    background_tasks.add_task(process_ingestion_job, ctx, job_id=UUID(str(job["id"])))
+    return {"job": job}
+
+
+@router.get("/jobs", tags=["documents"])
+async def list_jobs(
+    ctx: Annotated[RLSContext, Depends(get_current_rls_context)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+) -> dict[str, list[dict[str, object]]]:
+    """List ingestion jobs scoped to the caller's organization via RLS."""
+    jobs = await list_ingestion_jobs(ctx, limit=limit)
+    return {"jobs": jobs}
+
+
+@router.get("/jobs/{job_id}", tags=["documents"])
+async def get_job_status(
+    job_id: UUID,
+    ctx: Annotated[RLSContext, Depends(get_current_rls_context)],
+) -> dict[str, object]:
+    """Poll status of a background ingestion job under RLS."""
+    job = await get_ingestion_job(ctx, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
+    return {"job": job}
+
+
 @router.patch("/documents/{document_id}/classification", tags=["documents"])
 async def update_document_classification(
     document_id: UUID,
@@ -233,6 +336,7 @@ async def update_document_classification(
             ctx,
             document_id=document_id,
             new_clearance_level=payload.clearance_level,
+            new_department=payload.department,
         )
     except ClearanceViolationError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
@@ -241,6 +345,18 @@ async def update_document_classification(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
 
     return {"document": updated.to_dict()}
+
+
+@router.delete("/documents/{document_id}", tags=["documents"])
+async def remove_document(
+    document_id: UUID,
+    ctx: Annotated[RLSContext, Depends(require_org_admin)],
+) -> dict[str, str]:
+    """Delete a document and its chunks (Org Admin only, tenant-scoped via RLS)."""
+    deleted = await delete_document(ctx, document_id=document_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+    return {"status": "deleted"}
 
 
 @router.get("/documents/{document_id}/view", tags=["documents"])
@@ -261,6 +377,21 @@ async def query_knowledge_base(
     ctx: Annotated[RLSContext, Depends(get_current_rls_context)],
 ) -> dict[str, object]:
     """Execute RLS-scoped hybrid retrieval, Groq synthesis, and audit logging."""
+    try:
+        enforce_org_rate_limit(ctx.org_id)
+        await check_and_increment_query_usage(ctx)
+    except RateLimitExceededError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
+    except QuotaExceededError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
+        ) from exc
+
     total_start = time.perf_counter()
 
     embed_start = time.perf_counter()

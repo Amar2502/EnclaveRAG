@@ -1,3 +1,21 @@
+export interface AuthUser {
+  user_id: string;
+  org_id: string;
+  org_name: string;
+  email: string;
+  full_name: string;
+  role_title: string;
+  department: string;
+  clearance_level: number;
+  is_org_admin: boolean;
+}
+
+export interface AuthResponse {
+  access_token: string;
+  token_type: string;
+  user: AuthUser;
+}
+
 export interface Persona {
   user_id: string;
   org_id: string;
@@ -8,12 +26,40 @@ export interface Persona {
   role_title: string;
   department: string;
   clearance_level: number;
+  is_org_admin?: boolean;
 }
 
 export interface PersonaTokenResponse {
   access_token: string;
   token_type: string;
   persona: Persona;
+}
+
+export interface OrgUser {
+  id: string;
+  email: string;
+  full_name: string;
+  role_title: string;
+  department: string;
+  clearance_level: number;
+  is_org_admin: boolean;
+  is_active: boolean;
+  token_version: number;
+  created_at: string;
+}
+
+export interface InvitationRecord {
+  id: string;
+  org_id?: string;
+  email: string;
+  role_title: string;
+  department: string;
+  clearance_level: number;
+  expires_at: string;
+  accepted_at?: string | null;
+  created_at: string;
+  invite_token?: string;
+  invite_url?: string;
 }
 
 export interface DocumentRecord {
@@ -35,6 +81,32 @@ export interface DocumentDetail extends DocumentRecord {
     chunk_index: number;
     content: string;
   }>;
+}
+
+export interface IngestionJob {
+  id: string;
+  org_id: string;
+  document_id: string | null;
+  title: string;
+  department: string;
+  clearance_level: number;
+  filename: string;
+  storage_key: string;
+  status: "queued" | "processing" | "indexed" | "failed";
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface BillingUsage {
+  org_id: string;
+  plan_tier: "free" | "pro" | "enterprise";
+  period_ym: string;
+  max_documents: number;
+  documents_count: number;
+  monthly_query_limit: number;
+  queries_used: number;
+  tokens_used: number;
 }
 
 export interface Citation {

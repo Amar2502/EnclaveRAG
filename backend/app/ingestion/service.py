@@ -11,6 +11,7 @@ from psycopg import AsyncConnection
 from psycopg.errors import InsufficientPrivilege
 
 from app.core.db import RLSContext, get_db_pool, scoped_rls_transaction
+from app.core.quotas import enforce_document_quota
 from app.ingestion.chunker import chunk_text
 from app.ingestion.embedder import embed_documents
 
@@ -125,6 +126,22 @@ async def insert_document_with_chunks(
     )
 
 
+def validate_write_scope(ctx: RLSContext, *, clearance_level: int, department: str) -> None:
+    """Enforce clearance and L3/L4 department write boundaries before DB transaction."""
+    if clearance_level > ctx.clearance_level:
+        raise ClearanceViolationError(
+            "Cannot write or classify a document above your own clearance level."
+        )
+    if (
+        clearance_level >= 3
+        and not ctx.is_org_admin
+        and department not in ("General", ctx.department)
+    ):
+        raise ClearanceViolationError(
+            "Non-admins cannot assign L3/L4 documents to another department."
+        )
+
+
 async def ingest_document(
     ctx: RLSContext,
     *,
@@ -135,10 +152,8 @@ async def ingest_document(
     source_uri: str,
 ) -> DocumentRecord:
     """Chunk text, generate Gemini embeddings, and persist under RLS enforcement."""
-    if clearance_level > ctx.clearance_level:
-        raise ClearanceViolationError(
-            "Cannot ingest a document above your own clearance level."
-        )
+    validate_write_scope(ctx, clearance_level=clearance_level, department=department)
+    await enforce_document_quota(ctx)
 
     chunks = chunk_text(content)
     if not chunks:
@@ -202,12 +217,14 @@ async def reclassify_document(
     *,
     document_id: UUID,
     new_clearance_level: int,
+    new_department: str | None = None,
 ) -> DocumentRecord | None:
-    """Update a document's clearance level in O(1) without re-embedding chunks."""
-    if new_clearance_level > ctx.clearance_level:
-        raise ClearanceViolationError(
-            "Cannot reclassify a document above your own clearance level."
-        )
+    """Update document clearance and/or department in O(1) without re-embedding."""
+    validate_write_scope(
+        ctx,
+        clearance_level=new_clearance_level,
+        department=new_department if new_department is not None else ctx.department,
+    )
 
     new_tag = classification_tag_for(new_clearance_level)
 
@@ -218,17 +235,23 @@ async def reclassify_document(
                 UPDATE documents
                 SET clearance_level = %s,
                     classification_tag = %s,
+                    department = COALESCE(%s, department),
                     updated_at = now()
                 WHERE id = %s
                 RETURNING id, org_id, title, department, clearance_level,
                           classification_tag, source_uri, created_at, updated_at
                 """,
-                (new_clearance_level, new_tag, document_id),
+                (
+                    new_clearance_level,
+                    new_tag,
+                    new_department.strip() if new_department else None,
+                    document_id,
+                ),
             )
             row = await cur.fetchone()
     except InsufficientPrivilege as exc:
         raise ClearanceViolationError(
-            "Database RLS rejected reclassification above caller clearance."
+            "Database RLS rejected reclassification above caller scope."
         ) from exc
 
     if row is None:
@@ -247,6 +270,16 @@ async def reclassify_document(
     )
 
 
+async def delete_document(ctx: RLSContext, *, document_id: UUID) -> bool:
+    """Delete a document (cascading to chunks) inside an RLS-scoped transaction."""
+    async with scoped_rls_transaction(ctx) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "DELETE FROM documents WHERE id = %s RETURNING id",
+            (document_id,),
+        )
+        return (await cur.fetchone()) is not None
+
+
 async def list_demo_personas() -> list[dict[str, Any]]:
     """Return seeded organization users for demo persona switching."""
     pool = get_db_pool()
@@ -254,9 +287,11 @@ async def list_demo_personas() -> list[dict[str, Any]]:
         await cur.execute(
             """
             SELECT u.id, u.org_id, o.name, o.slug, u.email, u.full_name,
-                   u.role_title, u.department, u.clearance_level
+                   u.role_title, u.department, u.clearance_level,
+                   u.is_org_admin, u.token_version
             FROM users u
             JOIN organizations o ON o.id = u.org_id
+            WHERE u.is_active = true
             ORDER BY o.name ASC, u.clearance_level ASC
             """
         )
@@ -273,6 +308,8 @@ async def list_demo_personas() -> list[dict[str, Any]]:
             "role_title": row[6],
             "department": row[7],
             "clearance_level": row[8],
+            "is_org_admin": row[9],
+            "token_version": row[10],
         }
         for row in rows
     ]
@@ -285,10 +322,11 @@ async def get_persona_by_email(email: str) -> dict[str, Any] | None:
         await cur.execute(
             """
             SELECT u.id, u.org_id, o.name, o.slug, u.email, u.full_name,
-                   u.role_title, u.department, u.clearance_level
+                   u.role_title, u.department, u.clearance_level,
+                   u.is_org_admin, u.token_version
             FROM users u
             JOIN organizations o ON o.id = u.org_id
-            WHERE u.email = %s
+            WHERE u.email = %s AND u.is_active = true
             """,
             (email,),
         )
@@ -307,4 +345,6 @@ async def get_persona_by_email(email: str) -> dict[str, Any] | None:
         "role_title": row[6],
         "department": row[7],
         "clearance_level": row[8],
+        "is_org_admin": row[9],
+        "token_version": row[10],
     }

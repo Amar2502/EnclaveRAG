@@ -28,6 +28,7 @@ pnpm-debug.log*
 
 # Docker / Local persistence
 pgdata/
+storage/
 *.db
 *.sqlite3
 

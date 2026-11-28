@@ -94,6 +94,8 @@ async def test_hierarchical_clearance_and_pool_reset(isolated_world: IsolatedTes
                 org_id=isolated_world.org_a,
                 user_id=isolated_world.user_a_l4,
                 clearance_level=4,
+                department="Executive",
+                is_org_admin=True,
             ),
             pool=pool,
         ) as conn:

@@ -22,6 +22,8 @@ class RLSContext:
     user_id: UUID
     clearance_level: int
     department: str = "General"
+    is_org_admin: bool = False
+    token_version: int = 1
 
     def __post_init__(self) -> None:
         if not 1 <= self.clearance_level <= 4:
@@ -85,8 +87,16 @@ async def scoped_rls_transaction(
         await conn.execute(
             "SELECT set_config('app.org_id', %s, true), "
             "set_config('app.clearance_level', %s, true), "
-            "set_config('app.user_id', %s, true)",
-            (str(ctx.org_id), str(ctx.clearance_level), str(ctx.user_id)),
+            "set_config('app.user_id', %s, true), "
+            "set_config('app.department', %s, true), "
+            "set_config('app.is_org_admin', %s, true)",
+            (
+                str(ctx.org_id),
+                str(ctx.clearance_level),
+                str(ctx.user_id),
+                ctx.department,
+                "true" if ctx.is_org_admin else "false",
+            ),
         )
         yield conn
 

@@ -94,13 +94,14 @@ async def isolated_world() -> AsyncIterator[IsolatedTestWorld]:
             )
             await admin_conn.execute(
                 """
-                INSERT INTO users (id, org_id, email, full_name, role_title, department, clearance_level)
+                INSERT INTO users
+                    (id, org_id, email, full_name, role_title, department, clearance_level, is_org_admin)
                 VALUES
-                    (%s, %s, %s, 'Test L1', 'Intern', 'Engineering', 1),
-                    (%s, %s, %s, 'Test L2', 'Lead', 'Engineering', 2),
-                    (%s, %s, %s, 'Test L4', 'VP', 'Executive', 4),
-                    (%s, %s, %s, 'OrgB L1', 'Analyst', 'Product', 1),
-                    (%s, %s, %s, 'OrgB L4', 'Admin', 'Executive', 4)
+                    (%s, %s, %s, 'Test L1', 'Intern', 'Engineering', 1, false),
+                    (%s, %s, %s, 'Test L2', 'Lead', 'Engineering', 2, false),
+                    (%s, %s, %s, 'Test L4', 'VP', 'Executive', 4, true),
+                    (%s, %s, %s, 'OrgB L1', 'Analyst', 'Product', 1, false),
+                    (%s, %s, %s, 'OrgB L4', 'Admin', 'Executive', 4, true)
                 """,
                 (
                     user_a_l1, org_a, email_a_l1,

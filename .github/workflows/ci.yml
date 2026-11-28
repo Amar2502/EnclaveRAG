@@ -45,11 +45,14 @@ jobs:
         run: |
           psql -h localhost -U postgres -d enclave_rag -v ON_ERROR_STOP=1 -f backend/db/migrations/001_init_schema.sql
           psql -h localhost -U postgres -d enclave_rag -v ON_ERROR_STOP=1 -f backend/db/migrations/002_rls_policies.sql
+          psql -h localhost -U postgres -d enclave_rag -v ON_ERROR_STOP=1 -f backend/db/migrations/003_saas_auth.sql
+          psql -h localhost -U postgres -d enclave_rag -v ON_ERROR_STOP=1 -f backend/db/migrations/004_abac_rls.sql
+          psql -h localhost -U postgres -d enclave_rag -v ON_ERROR_STOP=1 -f backend/db/migrations/005_jobs_and_quotas.sql
 
       - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install fastapi "uvicorn[standard]" pydantic-settings "psycopg[binary,pool]" pgvector pyjwt httpx python-multipart pypdf pytest pytest-asyncio ruff
+          pip install fastapi "uvicorn[standard]" pydantic-settings "psycopg[binary,pool]" pgvector pyjwt "pwdlib[argon2]" httpx python-multipart pypdf pytest pytest-asyncio ruff
 
       - name: Run Ruff lint check
         working-directory: backend

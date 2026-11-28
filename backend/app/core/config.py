@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     jwt_secret_key: str = "dev-only-change-this-secret-key-min-32-bytes"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
+    enable_demo_mode: bool = True
+    app_base_url: str = "http://localhost:3000"
 
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
@@ -25,6 +27,22 @@ class Settings(BaseSettings):
     embedding_dimension: int = 768
 
     cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+    storage_provider: str = "local"
+    local_storage_dir: str = "./storage"
+    s3_endpoint_url: str = "https://t3.storage.dev"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_bucket_name: str = "enclave-rag-uploads"
+    s3_region: str = "auto"
+
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket_name: str = "enclave-rag-uploads"
+
+    org_rate_limit_per_min: int = 60
+    stripe_webhook_secret: str = ""
 
     model_config = SettingsConfigDict(env_file=(".env", str(_ROOT_ENV)), extra="ignore")
 

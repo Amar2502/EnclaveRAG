@@ -133,6 +133,8 @@ async def test_o1_reclassification_and_zero_existence_leakage(
             org_id=isolated_world.org_a,
             user_id=isolated_world.user_a_l4,
             clearance_level=4,
+            department="Executive",
+            is_org_admin=True,
         )
         async with scoped_rls_transaction(ctx_a4) as conn, conn.cursor() as cur:
             await cur.execute(
