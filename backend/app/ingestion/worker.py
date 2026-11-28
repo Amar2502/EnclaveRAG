@@ -39,6 +39,7 @@ async def enqueue_ingestion_job(
     filename: str,
     content_bytes: bytes,
     content_type: str = "application/octet-stream",
+    replace_existing: bool = True,
     store: ObjectStore | None = None,
 ) -> dict[str, Any]:
     """Validate upload, persist bytes to object storage, and create a queued DB job."""
@@ -51,7 +52,8 @@ async def enqueue_ingestion_job(
         raise ValueError("Uploaded file is empty.")
 
     validate_write_scope(ctx, clearance_level=clearance_level, department=department)
-    await enforce_document_quota(ctx)
+    if not replace_existing:
+        await enforce_document_quota(ctx)
 
     object_store = store or get_object_store()
     storage_key = build_storage_key(ctx.org_id, filename)
@@ -62,8 +64,8 @@ async def enqueue_ingestion_job(
             """
             INSERT INTO ingestion_jobs
                 (org_id, uploaded_by, title, department, clearance_level,
-                 filename, storage_key, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'queued')
+                 filename, storage_key, status, replace_existing)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'queued', %s)
             RETURNING id, org_id, document_id, title, department, clearance_level,
                       filename, storage_key, status, error_message, created_at, completed_at
             """,
@@ -75,6 +77,7 @@ async def enqueue_ingestion_job(
                 clearance_level,
                 filename,
                 storage_key,
+                replace_existing,
             ),
         )
         row = await cur.fetchone()
@@ -98,7 +101,8 @@ async def process_ingestion_job(
             SET status = 'processing'
             WHERE id = %s AND status = 'queued'
             RETURNING id, org_id, document_id, title, department, clearance_level,
-                      filename, storage_key, status, error_message, created_at, completed_at
+                      filename, storage_key, status, error_message, created_at,
+                      completed_at, replace_existing
             """,
             (job_id,),
         )
@@ -107,7 +111,7 @@ async def process_ingestion_job(
     if row is None:
         return None
 
-    _, _, _, title, department, clearance_level, filename, storage_key, *_ = row
+    _, _, _, title, department, clearance_level, filename, storage_key, *_, replace_existing = row
 
     try:
         raw_bytes = await object_store.get_bytes(storage_key)
@@ -119,6 +123,8 @@ async def process_ingestion_job(
             clearance_level=int(clearance_level),
             content=extracted,
             source_uri=f"storage://{storage_key}",
+            storage_key=storage_key,
+            replace_existing=bool(replace_existing),
         )
     # Catch all worker boundary failures (parsing, S3/Tigris, Gemini, DB) so the job
     # records 'failed' instead of remaining stuck in 'processing'.

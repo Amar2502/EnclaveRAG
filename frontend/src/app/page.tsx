@@ -1,13 +1,16 @@
 "use client";
 
-import { ArrowRight, Building2, Lock, ShieldCheck, Sparkles } from "lucide-react";
+import { ArrowRight, Building2, Lock, Moon, ShieldCheck, Sparkles, Sun } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { DEMO_MODE_ENABLED, getSession } from "@/lib/session";
+import { useAppStore } from "@/store/useAppStore";
 
 export default function LandingPage() {
   const [loggedInOrg, setLoggedInOrg] = useState<string | null>(null);
+  const theme = useAppStore((s) => s.theme);
+  const toggleTheme = useAppStore((s) => s.toggleTheme);
 
   useEffect(() => {
     const session = getSession();
@@ -28,6 +31,14 @@ export default function LandingPage() {
           </div>
 
           <div className="flex items-center gap-2.5 text-xs font-semibold">
+            <button
+              type="button"
+              onClick={toggleTheme}
+              className="rounded-lg border border-slate-700 bg-slate-900 p-2 text-slate-300 hover:text-white"
+              title={theme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
+            >
+              {theme === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+            </button>
             {DEMO_MODE_ENABLED && (
               <Link
                 href="/demo"
@@ -56,14 +67,15 @@ export default function LandingPage() {
       <main className="mx-auto max-w-5xl px-4 py-20 text-center">
         <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300">
           <Lock className="h-3.5 w-3.5" />
-          PostgreSQL FORCE RLS · Clearance + Department ABAC
+          Private Company Knowledge · Role & Department Access Control
         </div>
         <h1 className="mx-auto max-w-3xl text-4xl font-bold tracking-tight text-white sm:text-5xl">
-          Enterprise Knowledge Search Without Cross-Level Data Leaks
+          Instant Answers From Your Company Docs — Strictly Within Your Permissions
         </h1>
         <p className="mx-auto mt-5 max-w-2xl text-base text-slate-400">
-          EnclaveRAG enforces organization isolation, 4-tier clearance boundaries (L1–L4),
-          and department ABAC inside PostgreSQL before a single token reaches an LLM.
+          EnclaveRAG keeps every department&apos;s policies, handbooks, and confidential files
+          isolated by organization, role, and access level so employees only see what they are
+          authorized to read.
         </p>
 
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
@@ -96,16 +108,16 @@ export default function LandingPage() {
 
         <div className="mt-16 grid grid-cols-1 gap-4 text-left md:grid-cols-3">
           <FeatureCard
-            title="Zero-Trust DB Isolation"
-            body="Every query binds verified JWT claims via transaction-scoped SET LOCAL under a non-superuser role."
+            title="Zero Cross-Team Leaks"
+            body="Every search is scoped to your organization, department, and clearance tier before answers are generated."
           />
           <FeatureCard
-            title="O(1) Governance & Revocation"
-            body="Reclassify documents across tiers or revoke employee sessions instantly without re-embedding vectors."
+            title="Instant Access Controls"
+            body="Admins can update document visibility, change team permissions, or sign out sessions in one click."
           />
           <FeatureCard
-            title="Hybrid RRF + Grounded Citations"
-            body="Combines pgvector cosine similarity with PostgreSQL tsvector keyword search and verified source links."
+            title="Verified Source Citations"
+            body="Every answer links directly to the underlying company documents so employees can read or download the original file."
           />
         </div>
       </main>

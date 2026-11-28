@@ -10,10 +10,14 @@ from pydantic import BaseModel, Field
 
 from app.auth.service import (
     ConflictError,
+    cancel_invitation,
     create_invitation,
+    get_org_clearance_labels,
     list_org_invitations,
     list_org_users,
+    resend_invitation,
     revoke_user_sessions,
+    update_org_clearance_labels,
     update_org_user,
 )
 from app.core.db import RLSContext
@@ -113,3 +117,58 @@ async def post_invite(
     except ConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return {"invite": invite}
+
+
+@router.delete("/invites/{invite_id}")
+async def delete_invite(
+    invite_id: UUID,
+    ctx: Annotated[RLSContext, Depends(require_org_admin)],
+) -> dict[str, str]:
+    """Cancel a pending invitation in the admin's organization."""
+    cancelled = await cancel_invitation(ctx, invite_id=invite_id)
+    if not cancelled:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Pending invitation not found.",
+        )
+    return {"status": "cancelled"}
+
+
+@router.post("/invites/{invite_id}/resend")
+async def resend_invite(
+    invite_id: UUID,
+    ctx: Annotated[RLSContext, Depends(require_org_admin)],
+) -> dict[str, object]:
+    """Regenerate invite token, extend expiry, and send email if configured."""
+    invite = await resend_invitation(ctx, invite_id=invite_id)
+    if invite is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Pending invitation not found.",
+        )
+    return {"invite": invite}
+
+
+class OrgSettingsRequest(BaseModel):
+    """Payload to customize organization-wide clearance tier labels."""
+
+    clearance_labels: dict[str, str]
+
+
+@router.get("/org-settings")
+async def get_org_settings(
+    ctx: Annotated[RLSContext, Depends(require_org_admin)],
+) -> dict[str, object]:
+    """Get customizable organization settings such as clearance tier labels."""
+    labels = await get_org_clearance_labels(ctx.org_id)
+    return {"clearance_labels": labels}
+
+
+@router.patch("/org-settings")
+async def patch_org_settings(
+    payload: OrgSettingsRequest,
+    ctx: Annotated[RLSContext, Depends(require_org_admin)],
+) -> dict[str, object]:
+    """Update customizable clearance tier labels for the admin's organization."""
+    labels = await update_org_clearance_labels(ctx, payload.clearance_labels)
+    return {"clearance_labels": labels}

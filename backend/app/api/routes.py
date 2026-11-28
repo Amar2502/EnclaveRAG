@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import time
+from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from fastapi import (
@@ -18,11 +21,13 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.admin_routes import router as admin_router
 from app.api.auth_routes import router as auth_router
 from app.api.billing_routes import router as billing_router
+from app.auth.service import get_org_clearance_labels
 from app.core.config import settings
 from app.core.db import RLSContext, scoped_rls_transaction
 from app.core.quotas import (
@@ -53,13 +58,23 @@ from app.ingestion.worker import (
     list_ingestion_jobs,
     process_ingestion_job,
 )
-from app.llm.synthesizer import NO_ACCESSIBLE_INFO_MESSAGE, synthesize_answer
+from app.llm.synthesizer import (
+    NO_ACCESSIBLE_INFO_MESSAGE,
+    synthesize_answer,
+    synthesize_answer_stream,
+)
 from app.retrieval.audit import (
+    append_conversation_turn,
+    create_or_get_conversation,
+    delete_conversation,
     get_accessible_document_detail,
+    get_conversation_detail,
     list_audit_logs,
+    list_conversations,
     log_query_audit,
 )
-from app.retrieval.hybrid_search import hybrid_rrf_search
+from app.retrieval.hybrid_search import HybridRetrievalResult, hybrid_rrf_search
+from app.storage.store import get_object_store
 
 router = APIRouter()
 router.include_router(auth_router)
@@ -102,6 +117,8 @@ class QueryRequest(BaseModel):
 
     query: str = Field(min_length=1, max_length=2000)
     top_k: int = Field(default=5, ge=1, le=20)
+    history: list[dict[str, str]] | None = None
+    conversation_id: UUID | None = None
 
 
 @router.get("/personas", tags=["demo"])
@@ -132,6 +149,7 @@ async def issue_persona_token(payload: PersonaTokenRequest) -> dict[str, object]
         token_version=int(persona.get("token_version", 1)),
     )
     token = create_access_token(ctx)
+    clearance_labels = await get_org_clearance_labels(persona["org_id"])
     return {
         "access_token": token,
         "token_type": "bearer",
@@ -145,6 +163,7 @@ async def issue_persona_token(payload: PersonaTokenRequest) -> dict[str, object]
             "department": persona["department"],
             "clearance_level": persona["clearance_level"],
             "is_org_admin": ctx.is_org_admin,
+            "clearance_labels": clearance_labels,
         },
     }
 
@@ -202,6 +221,8 @@ async def _run_ingest(
     clearance_level: int,
     content: str,
     source_uri: str,
+    storage_key: str | None = None,
+    replace_existing: bool = False,
 ) -> dict[str, object]:
     """Shared ingestion handler translating domain/provider errors to HTTP errors."""
     try:
@@ -212,6 +233,8 @@ async def _run_ingest(
             clearance_level=clearance_level,
             content=content,
             source_uri=source_uri,
+            storage_key=storage_key,
+            replace_existing=replace_existing,
         )
         return {"document": record.to_dict()}
     except ClearanceViolationError as exc:
@@ -250,14 +273,23 @@ async def upload_document(
     clearance_level: Annotated[int, Form(ge=1, le=4)],
     department: Annotated[str, Form()] = "General",
     title: Annotated[str | None, Form()] = None,
+    replace_existing: Annotated[bool, Form()] = True,
 ) -> dict[str, object]:
     """Ingest an uploaded .txt, .md, or .pdf document under RLS."""
     raw_bytes = await file.read()
-    filename = file.filename or "uploaded.txt"
+    filename = Path(file.filename or "uploaded.txt").name
     try:
         extracted = extract_text_from_upload(filename, raw_bytes)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    store = get_object_store()
+    storage_key = f"{ctx.org_id}/{uuid4()}-{filename}"
+    await store.put_bytes(
+        storage_key,
+        raw_bytes,
+        content_type=file.content_type or "application/octet-stream",
+    )
 
     return await _run_ingest(
         ctx,
@@ -266,6 +298,8 @@ async def upload_document(
         clearance_level=clearance_level,
         content=extracted,
         source_uri=f"upload://{filename}",
+        storage_key=storage_key,
+        replace_existing=replace_existing,
     )
 
 
@@ -277,6 +311,7 @@ async def upload_document_async(
     clearance_level: Annotated[int, Form(ge=1, le=4)],
     department: Annotated[str, Form()] = "General",
     title: Annotated[str | None, Form()] = None,
+    replace_existing: Annotated[bool, Form()] = True,
 ) -> dict[str, object]:
     """Store raw upload in object storage and process chunking/embeddings asynchronously."""
     raw_bytes = await file.read()
@@ -290,6 +325,7 @@ async def upload_document_async(
             filename=filename,
             content_bytes=raw_bytes,
             content_type=file.content_type or "application/octet-stream",
+            replace_existing=replace_existing,
         )
     except ClearanceViolationError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
@@ -371,12 +407,51 @@ async def view_document(
     return {"document": doc}
 
 
-@router.post("/query", tags=["rag"])
-async def query_knowledge_base(
-    payload: QueryRequest,
+@router.get("/documents/{document_id}/download", tags=["documents"])
+async def download_document(
+    document_id: UUID,
     ctx: Annotated[RLSContext, Depends(get_current_rls_context)],
-) -> dict[str, object]:
-    """Execute RLS-scoped hybrid retrieval, Groq synthesis, and audit logging."""
+) -> object:
+    """Return a presigned download URL (Tigris/S3) or stream the local file under RLS."""
+    doc = await get_accessible_document_detail(ctx, document_id)
+    if doc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    storage_key = doc.get("storage_key")
+    if not storage_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Original file is not available for download.",
+        )
+
+    store = get_object_store()
+    presigned_url = store.generate_presigned_download_url(str(storage_key), expires_in=300)
+    if presigned_url:
+        return {"download_url": presigned_url, "expires_in": 300, "filename": doc["title"]}
+
+    try:
+        data = await store.get_bytes(str(storage_key))
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Original file not found in storage.",
+        ) from exc
+
+    safe_name = Path(str(storage_key)).name
+    if len(safe_name) > 37 and safe_name[36] == "-":
+        safe_name = safe_name[37:]
+    return StreamingResponse(
+        iter([data]),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
+
+
+async def _prepare_rag_query(
+    payload: QueryRequest,
+    ctx: RLSContext,
+) -> tuple[float, int, HybridRetrievalResult]:
+    """Enforce rate/quota limits, embed query, and run RLS-scoped hybrid RRF search."""
     try:
         enforce_org_rate_limit(ctx.org_id)
         await check_and_increment_query_usage(ctx)
@@ -393,7 +468,6 @@ async def query_knowledge_base(
         ) from exc
 
     total_start = time.perf_counter()
-
     embed_start = time.perf_counter()
     try:
         query_embedding = await embed_query(payload.query)
@@ -410,35 +484,82 @@ async def query_knowledge_base(
         query_embedding=query_embedding,
         top_k=payload.top_k,
     )
+    return total_start, embed_ms, retrieval
+
+
+def _build_citations(answer: str, retrieval: HybridRetrievalResult) -> list[dict[str, object]]:
+    """Deduplicate cited documents when synthesis returns grounded content."""
+    citations: list[dict[str, object]] = []
+    if answer == NO_ACCESSIBLE_INFO_MESSAGE:
+        return citations
+    seen_docs: set[UUID] = set()
+    for chunk in retrieval.chunks:
+        if chunk.document_id not in seen_docs:
+            seen_docs.add(chunk.document_id)
+            citations.append(
+                {
+                    "document_id": str(chunk.document_id),
+                    "document_title": chunk.document_title,
+                    "department": chunk.department,
+                    "clearance_level": chunk.clearance_level,
+                    "classification_tag": chunk.classification_tag,
+                }
+            )
+    return citations
+
+
+def _build_trace(
+    ctx: RLSContext,
+    retrieval: HybridRetrievalResult,
+    *,
+    embed_ms: int,
+    llm_ms: int,
+    total_ms: int,
+) -> dict[str, object]:
+    """Format the retrieval and timing trace payload."""
+    return {
+        "rls_context": {
+            "org_id": str(ctx.org_id),
+            "user_id": str(ctx.user_id),
+            "clearance_level": ctx.clearance_level,
+            "department": ctx.department,
+        },
+        "retrieval": {
+            "iterative_scan_enabled": retrieval.iterative_scan_enabled,
+            "vector_candidates": retrieval.vector_candidates,
+            "fts_candidates": retrieval.fts_candidates,
+            "fused_count": len(retrieval.chunks),
+            "chunks": [chunk.to_trace_dict() for chunk in retrieval.chunks],
+        },
+        "timings_ms": {
+            "embed": embed_ms,
+            "retrieval": retrieval.retrieval_ms,
+            "llm": llm_ms,
+            "total": total_ms,
+        },
+    }
+
+
+@router.post("/query", tags=["rag"])
+async def query_knowledge_base(
+    payload: QueryRequest,
+    ctx: Annotated[RLSContext, Depends(get_current_rls_context)],
+) -> dict[str, object]:
+    """Execute RLS-scoped hybrid retrieval, Groq synthesis, and audit logging."""
+    total_start, embed_ms, retrieval = await _prepare_rag_query(payload, ctx)
 
     llm_start = time.perf_counter()
     try:
-        answer = await synthesize_answer(payload.query, retrieval.chunks)
+        answer = await synthesize_answer(payload.query, retrieval.chunks, history=payload.history)
     except (RuntimeError, httpx.HTTPError) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Chat synthesis service error: {exc}",
         ) from exc
     llm_ms = int((time.perf_counter() - llm_start) * 1000)
-
     total_ms = int((time.perf_counter() - total_start) * 1000)
 
-    citations: list[dict[str, object]] = []
-    if answer != NO_ACCESSIBLE_INFO_MESSAGE:
-        seen_docs: set[UUID] = set()
-        for chunk in retrieval.chunks:
-            if chunk.document_id not in seen_docs:
-                seen_docs.add(chunk.document_id)
-                citations.append(
-                    {
-                        "document_id": str(chunk.document_id),
-                        "document_title": chunk.document_title,
-                        "department": chunk.department,
-                        "clearance_level": chunk.clearance_level,
-                        "classification_tag": chunk.classification_tag,
-                    }
-                )
-
+    citations = _build_citations(answer, retrieval)
     await log_query_audit(
         ctx,
         query_text=payload.query,
@@ -446,31 +567,144 @@ async def query_knowledge_base(
         latency_ms=total_ms,
     )
 
+    conv_id = await create_or_get_conversation(
+        ctx,
+        conversation_id=payload.conversation_id,
+        first_query=payload.query,
+    )
+    await append_conversation_turn(
+        ctx,
+        conversation_id=conv_id,
+        query_text=payload.query,
+        answer_text=answer,
+        citations=citations,
+    )
+
     return {
         "answer": answer,
         "citations": citations,
-        "trace": {
-            "rls_context": {
-                "org_id": str(ctx.org_id),
-                "user_id": str(ctx.user_id),
-                "clearance_level": ctx.clearance_level,
-                "department": ctx.department,
-            },
-            "retrieval": {
-                "iterative_scan_enabled": retrieval.iterative_scan_enabled,
-                "vector_candidates": retrieval.vector_candidates,
-                "fts_candidates": retrieval.fts_candidates,
-                "fused_count": len(retrieval.chunks),
-                "chunks": [chunk.to_trace_dict() for chunk in retrieval.chunks],
-            },
-            "timings_ms": {
-                "embed": embed_ms,
-                "retrieval": retrieval.retrieval_ms,
-                "llm": llm_ms,
-                "total": total_ms,
-            },
-        },
+        "conversation_id": str(conv_id),
+        "trace": _build_trace(
+            ctx, retrieval, embed_ms=embed_ms, llm_ms=llm_ms, total_ms=total_ms
+        ),
     }
+
+
+@router.post("/query/stream", tags=["rag"])
+async def query_knowledge_base_stream(
+    payload: QueryRequest,
+    ctx: Annotated[RLSContext, Depends(get_current_rls_context)],
+) -> StreamingResponse:
+    """Stream Groq tokens over SSE while enforcing RLS retrieval and conversation persistence."""
+    total_start, embed_ms, retrieval = await _prepare_rag_query(payload, ctx)
+
+    async def _event_stream() -> AsyncIterator[str]:
+        llm_start = time.perf_counter()
+        parts: list[str] = []
+        try:
+            async for token in synthesize_answer_stream(
+                payload.query, retrieval.chunks, history=payload.history
+            ):
+                parts.append(token)
+                yield f"event: token\ndata: {json.dumps({'text': token})}\n\n"
+        except (RuntimeError, httpx.HTTPError) as exc:
+            yield f"event: error\ndata: {json.dumps({'detail': f'Chat synthesis service error: {exc}'})}\n\n"
+            return
+
+        llm_ms = int((time.perf_counter() - llm_start) * 1000)
+        total_ms = int((time.perf_counter() - total_start) * 1000)
+        full_answer = "".join(parts).strip() or NO_ACCESSIBLE_INFO_MESSAGE
+        citations = _build_citations(full_answer, retrieval)
+
+        await log_query_audit(
+            ctx,
+            query_text=payload.query,
+            retrieved_doc_ids=[chunk.document_id for chunk in retrieval.chunks],
+            latency_ms=total_ms,
+        )
+        conv_id = await create_or_get_conversation(
+            ctx,
+            conversation_id=payload.conversation_id,
+            first_query=payload.query,
+        )
+        await append_conversation_turn(
+            ctx,
+            conversation_id=conv_id,
+            query_text=payload.query,
+            answer_text=full_answer,
+            citations=citations,
+        )
+        done_payload = {
+            "answer": full_answer,
+            "citations": citations,
+            "conversation_id": str(conv_id),
+            "trace": _build_trace(
+                ctx, retrieval, embed_ms=embed_ms, llm_ms=llm_ms, total_ms=total_ms
+            ),
+        }
+        yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/conversations", tags=["rag"])
+async def get_conversations(
+    ctx: Annotated[RLSContext, Depends(get_current_rls_context)],
+) -> dict[str, list[dict[str, object]]]:
+    """List the caller's own saved chat conversations under RLS."""
+    conversations = await list_conversations(ctx)
+    return {"conversations": conversations}
+
+
+@router.get("/conversations/{conversation_id}", tags=["rag"])
+async def get_conversation(
+    conversation_id: UUID,
+    ctx: Annotated[RLSContext, Depends(get_current_rls_context)],
+) -> dict[str, object]:
+    """Retrieve a saved conversation and its turns for the caller."""
+    detail = await get_conversation_detail(ctx, conversation_id)
+    if detail is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
+    return {"conversation": detail}
+
+
+@router.delete("/conversations/{conversation_id}", tags=["rag"])
+async def remove_conversation(
+    conversation_id: UUID,
+    ctx: Annotated[RLSContext, Depends(get_current_rls_context)],
+) -> dict[str, object]:
+    """Delete a saved conversation belonging to the caller."""
+    deleted = await delete_conversation(ctx, conversation_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
+    return {"deleted": True, "conversation_id": str(conversation_id)}
+
+
+@router.get("/suggestions", tags=["rag"])
+async def get_query_suggestions(
+    ctx: Annotated[RLSContext, Depends(get_current_rls_context)],
+) -> dict[str, list[str]]:
+    """Return safe, non-leaking starter questions derived solely from accessible documents."""
+    docs = await list_accessible_documents(ctx)
+    if not docs:
+        return {
+            "suggestions": [
+                "What documents do I currently have access to?",
+                "How do I upload a document for my team?",
+            ]
+        }
+
+    suggestions: list[str] = []
+    for doc in docs[:3]:
+        suggestions.append(f"Summarize the key points from {doc['title']}")
+    if len(docs) > 1:
+        depts = sorted({str(d.get("department", "General")) for d in docs})
+        suggestions.append(f"What policies or guidelines apply to {depts[0]}?")
+    return {"suggestions": suggestions[:4]}
 
 
 @router.get("/audit", tags=["audit"])

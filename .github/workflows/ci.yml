@@ -48,6 +48,8 @@ jobs:
           psql -h localhost -U postgres -d enclave_rag -v ON_ERROR_STOP=1 -f backend/db/migrations/003_saas_auth.sql
           psql -h localhost -U postgres -d enclave_rag -v ON_ERROR_STOP=1 -f backend/db/migrations/004_abac_rls.sql
           psql -h localhost -U postgres -d enclave_rag -v ON_ERROR_STOP=1 -f backend/db/migrations/005_jobs_and_quotas.sql
+          psql -h localhost -U postgres -d enclave_rag -v ON_ERROR_STOP=1 -f backend/db/migrations/006_ux_conversations_and_versions.sql
+          psql -h localhost -U postgres -d enclave_rag -v ON_ERROR_STOP=1 -f backend/db/migrations/007_ux4_resets_and_org_labels.sql
 
       - name: Install backend dependencies
         run: |

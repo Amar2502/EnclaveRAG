@@ -13,8 +13,11 @@ from app.auth.service import (
     InvalidInvitationError,
     accept_invitation,
     authenticate_user,
+    confirm_password_reset,
     register_organization,
+    request_password_reset,
     revoke_user_sessions,
+    update_own_profile,
 )
 from app.core.db import RLSContext
 from app.core.security import get_current_rls_context
@@ -93,3 +96,58 @@ async def accept_invite(payload: AcceptInviteRequest) -> dict[str, object]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except ConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+class UpdateProfileRequest(BaseModel):
+    """Payload for updating the signed-in user's name or password."""
+
+    full_name: str | None = Field(default=None, min_length=2, max_length=120)
+    current_password: str | None = Field(default=None, min_length=1, max_length=128)
+    new_password: str | None = Field(default=None, min_length=8, max_length=128)
+
+
+class ForgotPasswordRequest(BaseModel):
+    """Payload to request a one-time password reset email."""
+
+    email: str = Field(min_length=5, max_length=255)
+
+
+class ResetPasswordRequest(BaseModel):
+    """Payload to complete a password reset using a one-time token."""
+
+    token: str = Field(min_length=10)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+@router.patch("/me")
+async def update_me(
+    payload: UpdateProfileRequest,
+    ctx: Annotated[RLSContext, Depends(get_current_rls_context)],
+) -> dict[str, object]:
+    """Allow the signed-in user to update their display name or password."""
+    try:
+        user = await update_own_profile(
+            ctx,
+            full_name=payload.full_name,
+            current_password=payload.current_password,
+            new_password=payload.new_password,
+        )
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"user": user}
+
+
+@router.post("/forgot-password")
+async def forgot_password(payload: ForgotPasswordRequest) -> dict[str, object]:
+    """Request a one-time password reset link (non-enumerating)."""
+    return await request_password_reset(email=payload.email)
+
+
+@router.post("/reset-password")
+async def reset_password(payload: ResetPasswordRequest) -> dict[str, str]:
+    """Reset a user's password with a valid one-time token."""
+    try:
+        await confirm_password_reset(raw_token=payload.token, new_password=payload.new_password)
+    except InvalidInvitationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"status": "password_reset"}

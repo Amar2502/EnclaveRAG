@@ -8,6 +8,7 @@ export interface AuthUser {
   department: string;
   clearance_level: number;
   is_org_admin: boolean;
+  clearance_labels?: Record<string, string>;
 }
 
 export interface AuthResponse {
@@ -60,6 +61,7 @@ export interface InvitationRecord {
   created_at: string;
   invite_token?: string;
   invite_url?: string;
+  email_sent?: boolean;
 }
 
 export interface DocumentRecord {
@@ -70,17 +72,38 @@ export interface DocumentRecord {
   clearance_level: number;
   classification_tag: string;
   source_uri: string;
+  version?: number;
   created_at: string;
   updated_at: string;
   chunk_count?: number;
 }
 
 export interface DocumentDetail extends DocumentRecord {
+  full_text?: string;
+  has_download?: boolean;
   chunks: Array<{
     chunk_id: string;
     chunk_index: number;
     content: string;
   }>;
+}
+
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+  citations?: Citation[];
+  created_at?: string;
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationDetail extends ConversationSummary {
+  messages: ChatTurn[];
 }
 
 export interface IngestionJob {
@@ -163,6 +186,8 @@ export interface AuditLogEntry {
   id: string;
   org_id: string;
   user_id: string;
+  user_name?: string | null;
+  user_email?: string | null;
   user_clearance: number;
   query_text: string;
   retrieved_doc_ids: string[];

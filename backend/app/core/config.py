@@ -43,6 +43,8 @@ class Settings(BaseSettings):
 
     org_rate_limit_per_min: int = 60
     stripe_webhook_secret: str = ""
+    resend_api_key: str = ""
+    resend_from_email: str = "EnclaveRAG <noreply@enclaverag.local>"
 
     model_config = SettingsConfigDict(env_file=(".env", str(_ROOT_ENV)), extra="ignore")
 

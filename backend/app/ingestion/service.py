@@ -41,6 +41,7 @@ class DocumentRecord:
     created_at: datetime
     updated_at: datetime
     chunk_count: int | None = None
+    version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         """Convert record to JSON-serializable dict."""
@@ -52,6 +53,7 @@ class DocumentRecord:
             "clearance_level": self.clearance_level,
             "classification_tag": self.classification_tag,
             "source_uri": self.source_uri,
+            "version": self.version,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
@@ -77,28 +79,63 @@ async def insert_document_with_chunks(
     source_uri: str,
     chunks: list[str],
     embeddings: list[list[float]],
+    storage_key: str | None = None,
+    replace_existing: bool = False,
 ) -> DocumentRecord:
-    """Insert a document and its precomputed chunks inside an active DB transaction."""
+    """Insert or replace (version-bump) a document and its chunks inside a transaction."""
     if len(chunks) != len(embeddings):
         raise ValueError("chunks and embeddings count must match")
 
-    doc_id = uuid4()
     tag = classification_tag_for(clearance_level)
 
     async with conn.cursor() as cur:
-        await cur.execute(
-            """
-            INSERT INTO documents
-                (id, org_id, title, department, clearance_level, classification_tag, source_uri)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            RETURNING id, org_id, title, department, clearance_level,
-                      classification_tag, source_uri, created_at, updated_at
-            """,
-            (doc_id, org_id, title, department, clearance_level, tag, source_uri),
-        )
-        row = await cur.fetchone()
+        existing_id: UUID | None = None
+        if replace_existing:
+            await cur.execute(
+                "SELECT id FROM documents WHERE org_id = %s AND title = %s LIMIT 1",
+                (org_id, title),
+            )
+            existing_row = await cur.fetchone()
+            if existing_row is not None:
+                existing_id = existing_row[0]
+
+        if existing_id is not None:
+            doc_id = existing_id
+            await cur.execute(
+                """
+                UPDATE documents
+                SET department = %s,
+                    clearance_level = %s,
+                    classification_tag = %s,
+                    source_uri = %s,
+                    storage_key = COALESCE(%s, storage_key),
+                    version = version + 1,
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING id, org_id, title, department, clearance_level,
+                          classification_tag, source_uri, created_at, updated_at, version
+                """,
+                (department, clearance_level, tag, source_uri, storage_key, doc_id),
+            )
+            row = await cur.fetchone()
+            await cur.execute("DELETE FROM document_chunks WHERE document_id = %s", (doc_id,))
+        else:
+            doc_id = uuid4()
+            await cur.execute(
+                """
+                INSERT INTO documents
+                    (id, org_id, title, department, clearance_level,
+                     classification_tag, source_uri, storage_key)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, org_id, title, department, clearance_level,
+                          classification_tag, source_uri, created_at, updated_at, version
+                """,
+                (doc_id, org_id, title, department, clearance_level, tag, source_uri, storage_key),
+            )
+            row = await cur.fetchone()
+
         if row is None:
-            raise RuntimeError("Failed to insert document row.")
+            raise RuntimeError("Failed to persist document row.")
 
         chunk_rows = [
             (uuid4(), org_id, doc_id, idx, chunk, vector)
@@ -123,6 +160,7 @@ async def insert_document_with_chunks(
         created_at=row[7],
         updated_at=row[8],
         chunk_count=len(chunk_rows),
+        version=int(row[9]),
     )
 
 
@@ -150,10 +188,23 @@ async def ingest_document(
     clearance_level: int,
     content: str,
     source_uri: str,
+    storage_key: str | None = None,
+    replace_existing: bool = False,
 ) -> DocumentRecord:
     """Chunk text, generate Gemini embeddings, and persist under RLS enforcement."""
     validate_write_scope(ctx, clearance_level=clearance_level, department=department)
-    await enforce_document_quota(ctx)
+
+    if not replace_existing:
+        await enforce_document_quota(ctx)
+    else:
+        async with scoped_rls_transaction(ctx) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT 1 FROM documents WHERE org_id = %s AND title = %s LIMIT 1",
+                (ctx.org_id, title),
+            )
+            exists = await cur.fetchone() is not None
+        if not exists:
+            await enforce_document_quota(ctx)
 
     chunks = chunk_text(content)
     if not chunks:
@@ -172,6 +223,8 @@ async def ingest_document(
                 source_uri=source_uri,
                 chunks=chunks,
                 embeddings=embeddings,
+                storage_key=storage_key,
+                replace_existing=replace_existing,
             )
     except InsufficientPrivilege as exc:
         raise ClearanceViolationError(
@@ -186,7 +239,7 @@ async def list_accessible_documents(ctx: RLSContext) -> list[DocumentRecord]:
             """
             SELECT d.id, d.org_id, d.title, d.department, d.clearance_level,
                    d.classification_tag, d.source_uri, d.created_at, d.updated_at,
-                   COUNT(c.id)::int AS chunk_count
+                   COUNT(c.id)::int AS chunk_count, d.version
             FROM documents d
             LEFT JOIN document_chunks c ON c.document_id = d.id
             GROUP BY d.id
@@ -207,6 +260,7 @@ async def list_accessible_documents(ctx: RLSContext) -> list[DocumentRecord]:
             created_at=row[7],
             updated_at=row[8],
             chunk_count=row[9],
+            version=int(row[10]),
         )
         for row in rows
     ]
